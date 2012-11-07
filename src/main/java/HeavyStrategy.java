@@ -84,7 +84,8 @@ public class HeavyStrategy implements IStrategyPerformer {
         if (tanksDistance > world.getWidth()) { tanksDistance = world.getWidth(); }
         double tanksDistanceCoef = world.getWidth() / tanksDistance;
         if (tanksDistanceCoef > MAX_TANK_DISTANCE_COEFFICIENT) { tanksDistanceCoef = MAX_TANK_DISTANCE_COEFFICIENT; }
-        if (this.needShoot(tanksDistanceCoef, self.getTurretAngleTo(targetTank)))
+        if (this.needShoot(tanksDistanceCoef, self.getTurretAngleTo(targetTank)) &&
+            self.getRemainingReloadingTime() < 2)
         {
             move.setFireType(FireType.PREMIUM_PREFERRED);
         }
