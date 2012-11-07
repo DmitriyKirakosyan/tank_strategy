@@ -75,6 +75,12 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
             moved = true;
         }
 
+        //если никуда не едем, значит крутимся в сторону цели для выстрела
+        if (!moved && Math.abs(shootAngle) > CATCH_ANGLE)
+        {
+            this.rotateTankToAngle(shootAngle, move);
+            moved = true;
+        }
 
         if (!moved)
         {
@@ -82,14 +88,10 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
         }
 
         //если угол пушки близок к цели и никуда не едем, то едем назад
-        if (!moved && shootAngle < MIN_ANGLE * 3)
+        if (!moved)
         {
             move.setRightTrackPower(-1);
             move.setLeftTrackPower(-1);
-        } else if (!moved)
-        //если никуда не едем, значит крутимся в сторону цели для выстрела
-        {
-            this.rotateTankToAngle(shootAngle, move);
         }
     }
 
