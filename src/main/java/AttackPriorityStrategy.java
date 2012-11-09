@@ -1,5 +1,6 @@
 import model.*;
 
+import javax.swing.plaf.basic.BasicInternalFrameTitlePane;
 import java.awt.geom.Point2D;
 
 /**
@@ -18,7 +19,9 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
     private final double MAX_TANKS_DISTANCE = 1500;
 
     private final double IN_CENTER_DISTANCE = 200;
-    private final double IN_ANGLE_DISTANCE = 200;
+    private final double IN_ANGLE_DISTANCE = 140;
+
+    private final double WALL_DISTANCE_FOR_MOVE_TO_ANGLE = 100;
 
     /**
      * Угол, в рамках которого цель считается под прицелом
@@ -42,23 +45,28 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
      */
     private final int MAX_TANKS_FOR_CHANGE_TARGET = 3;
 
+    private final TankMoveUtil _moveUtil = new TankMoveUtil();
+
     @Override
     public void perform(Tank self, World world, Move move)
     {
 
+        int numAliveEnemies = this.getNumAliveEnemyTanks(world.getTanks());
+        boolean allTanksAlive = this.getNumAliveEnemyTanks(world.getTanks()) == world.getTanks().length - 1;
+        boolean canSafeWalk = numAliveEnemies <= MAX_TANKS_FOR_SAFE_WALK;
         boolean moved = false;
 
         //Если мы не в центре или убит хотябы один танк, то уворачиваемся от пуль
         //самая приоритетная задача
-        if (!this.tankInCenter(self, world) ||
-            this.getNumAliveEnemyTanks(world.getTanks()) < world.getTanks().length - 1)
+        if (!this.tankInCenter(self, world, IN_CENTER_DISTANCE) || !allTanksAlive)
         {
             //dodge
-            moved = this.dodgeEnemyShell(self, world, move);
+            moved = this.dodge(self, world, move);
         }
 
         //move for bonus
-        if (!moved)
+        //если игроков достаточно мало, можно ездить за бонусом
+        if (!moved && canSafeWalk)
         {
             moved = this.tryMoveForBonus(self, world, move);
         }
@@ -66,32 +74,45 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
         //attack
         double shootAngle = this.shoot(self, world, move);
 
-        //move to angle
-        if (!moved && !this.inAngle(self, world) &&
-                this.getNumAliveEnemyTanks(world.getTanks()) == world.getTanks().length - 1)
-        {
-            Point2D anglePoint = this.getPointInClosestAngle(self, world);
-            this.moveToPoint(self, move, anglePoint.getX(), anglePoint.getY());
-            moved = true;
-        }
-
         //если никуда не едем, значит крутимся в сторону цели для выстрела
-        if (!moved && Math.abs(shootAngle) > CATCH_ANGLE)
+        if (!moved && Math.abs(shootAngle) > CATCH_ANGLE && !allTanksAlive)
         {
             this.rotateTankToAngle(shootAngle, move);
             moved = true;
         }
 
-        if (!moved)
+        //move to angle
+        if (!moved &&
+                !this.inAngle(self, world) &&
+                //!allTanksAlive &&//!this.tankInCenter(self, world, WALL_DISTANCE_FOR_MOVE_TO_ANGLE) &&
+                !canSafeWalk)
         {
-            moved = this.rotateTankForDodge(self, world, move);
+            Point2D anglePoint = this.getPointInClosestAngle(self, world);
+            //System.out.println("move to angle, point : " + anglePoint.getX() + ", " + anglePoint.getY());
+            _moveUtil.moveToPoint(self, move, anglePoint.getX(), anglePoint.getY(), MIN_ANGLE_FOR_MOVE);
+            //this.moveToPoint(self, move, anglePoint.getX(), anglePoint.getY());
+            moved = true;
+        }
+
+        //повернем танк перпендикулярно к цели, чтоб проще было увернуться
+        if (!moved && (!this.tankInCenter(self, world, IN_CENTER_DISTANCE) || !allTanksAlive))
+        {
+            Tank tank = this.getClosestAggressiveTank(self, world.getTanks(), true);
+            if (tank != null)
+            {
+                moved = this.rotateTankRelativelyEnemy(self, tank, move, Math.PI / 2);
+            }
         }
 
         //если угол пушки близок к цели и никуда не едем, то едем назад
         if (!moved)
         {
-            move.setRightTrackPower(-1);
-            move.setLeftTrackPower(-1);
+            Point2D[] points = _moveUtil.getClosePoints(self, 30);
+            Point2D goodPoint = _moveUtil.chooseGoodPoint(points, world, self);
+            _moveUtil.moveToPoint(self, move, goodPoint.getX(), goodPoint.getY(), MIN_ANGLE_FOR_MOVE);
+            //System.out.println("move to good point");
+            //this.moveToPoint(self, move, goodPoint.getX(), goodPoint.getY());
+            //this.moveTankBackward(move);
         }
     }
 
@@ -104,8 +125,9 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
      * @param move
      * @return  возвращает true если уклонение состоялось
      */
-    private boolean dodgeEnemyShell(Tank self, World world, Move move)
+    private boolean dodge(Tank self, World world, Move move)
     {
+        boolean result = false;
         Shell shellForDodge = null;
         Shell[] shells = world.getShells();
         for (Shell shell : shells)
@@ -122,36 +144,87 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
 
         if (shellForDodge != null)
         {
-            boolean moveForward;
-            if (this.isWallRearTank(self, world))
-            {
-                moveForward = true;
-            }
-            else
-            {
-                if (shellForDodge.getAngleTo(self) > 0)
-                {
-                    moveForward = self.getAngleTo(shellForDodge) > 0;
-                }
-                else
-                {
-                    moveForward = ! (self.getAngleTo(shellForDodge) > 0);
-                }
-            }
-
-            if (moveForward)
-            {
-                move.setRightTrackPower(1);
-                move.setLeftTrackPower(1);
-            }
-            else
-            {
-                move.setLeftTrackPower(-1);
-                move.setRightTrackPower(-1);
-            }
-            return true;
+            this.dodgeShell(self, world, move, shellForDodge);
+            result = true;
         }
-        return false;
+        else
+        {
+            //если нет летящей пули, пытаемся увернутся от потенциальной путем поворота
+            Tank closestAggressiveTank = this.getClosestAggressiveTank(self, world.getTanks(), false);
+            if (closestAggressiveTank != null)
+            {
+                this.dodgePotentialShootWithTern(self, closestAggressiveTank, move);
+                result = true;
+            }
+        }
+        return result;
+    }
+
+    private void dodgeShell(Tank self, World world, Move move, Shell shellForDodge)
+    {
+        boolean moveForward;
+        if (this.isWallRearTank(self, world))
+        {
+            moveForward = true;
+        }
+        else
+        {
+            if (shellForDodge.getAngleTo(self) > 0)
+            {
+                moveForward = self.getAngleTo(shellForDodge) > 0;
+            }
+            else
+            {
+                moveForward = ! (self.getAngleTo(shellForDodge) > 0);
+            }
+        }
+        if (moveForward)
+        {
+            this.moveTankForward(move);
+        }
+        else
+        {
+            this.moveTankBackward(move);
+        }
+    }
+
+    private void dodgePotentialShootWithTern(Tank self, Tank enemy, Move move)
+    {
+        double enemyGunAngle = enemy.getTurretAngleTo(self);
+        double angleToEnemy = self.getAngleTo(enemy);
+        if ( enemyGunAngle > 0)
+        {
+            if ((angleToEnemy > 0 && angleToEnemy < Math.PI / 2) ||
+                    (angleToEnemy < -Math.PI / 2))
+            {
+                this.rotateTankRight(move);
+            }
+            else
+            {
+                if (angleToEnemy > Math.PI / 2) {
+                    this.moveTankForward(move);
+                } else {
+                    this.moveTankBackward(move);
+                }
+            }
+        }
+        else
+        {
+            if (angleToEnemy > Math.PI / 2 ||
+                    (angleToEnemy < 0 && angleToEnemy > -Math.PI / 2))
+            {
+                this.rotateTankLeft(move);
+            }
+            else
+            {
+                if (angleToEnemy < Math.PI / 2) {
+                    this.moveTankBackward(move);
+                } else {
+                    this.moveTankForward(move);
+                }
+            }
+        }
+
     }
 
     /**
@@ -163,35 +236,30 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
      */
     private boolean tryMoveForBonus(Tank self, World world, Move move)
     {
-
         int numAliveEnemies = this.getNumAliveEnemyTanks(world.getTanks());
-        //если игроков достаточно мало, можно ездить за бонусом
-        if ( numAliveEnemies <= MAX_TANKS_FOR_SAFE_WALK )
+        Bonus resultBonus = null;
+        for (Bonus bonus : world.getBonuses())
         {
-            Bonus resultBonus = null;
-            for (Bonus bonus : world.getBonuses())
+            //если игроков еще много, лучше не высовываться по пустякам :)
+            if (numAliveEnemies <= MAX_TANKS_FOR_NEEDED_WALK || this.isUsefulBonus(self, bonus))
             {
-                //если игроков еще много, лучше не высовываться по пустякам :)
-                if (numAliveEnemies <= MAX_TANKS_FOR_NEEDED_WALK || this.isUsefulBonus(self, bonus))
+                if (Math.abs(self.getAngleTo(bonus)) < BONUS_ANGLE ||
+                        Math.abs(self.getAngleTo(bonus)) > Math.PI - BONUS_ANGLE)
                 {
-                    if (Math.abs(self.getAngleTo(bonus)) < BONUS_ANGLE ||
-                            Math.abs(self.getAngleTo(bonus)) > Math.PI - BONUS_ANGLE)
+                    if (resultBonus == null || self.getDistanceTo(resultBonus) > self.getDistanceTo(bonus))
                     {
-                        if (resultBonus == null || self.getDistanceTo(resultBonus) > self.getDistanceTo(bonus))
-                        {
-                            resultBonus = bonus;
-                        }
+                        resultBonus = bonus;
                     }
                 }
-
             }
 
-            if (resultBonus != null)
-            {
-                //System.out.println("angle to bonus " + self.getAngleTo(resultBonus));
-                this.moveToPoint(self, move, resultBonus.getX(), resultBonus.getY());
-                return true;
-            }
+        }
+
+        if (resultBonus != null)
+        {
+            //System.out.println("angle to bonus " + self.getAngleTo(resultBonus));
+            this.moveToPoint(self, move, resultBonus.getX(), resultBonus.getY());
+            return true;
         }
         return false;
     }
@@ -262,35 +330,43 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
         move.setRightTrackPower(0.75);
     }
 
+    private void moveTankForward(Move move)
+    {
+        move.setRightTrackPower(1);
+        move.setLeftTrackPower(1);
+    }
+
+    private void moveTankBackward(Move move)
+    {
+        move.setLeftTrackPower(-1);
+        move.setRightTrackPower(-1);
+    }
+
     /**
-     * Поворачивает танк боком к ближайшему опасному танку, чтобы
-     * было проще уворачиваться от его пуль
+     * Поворачивает танк относительно другого танка под углом angle
      * @param self
-     * @param world
+     * @param enemy
      * @param move
+     * @param relativelyAngle
      * @return true, если поворот осуществляется
      */
-    private boolean rotateTankForDodge(Tank self, World world, Move move)
+    private boolean rotateTankRelativelyEnemy(Tank self, Tank enemy, Move move, double relativelyAngle)
     {
         boolean result = false;
-        Tank tank = this.getClosesAggressiveTank(self, world.getTanks());
-        if (tank != null)
-        {
-            double currentAngle = self.getAngleTo(tank);
-            double angle = MIN_ANGLE_FOR_MOVE / 2;
+        double currentAngle = self.getAngleTo(enemy);
+        double angle = MIN_ANGLE_FOR_MOVE / 2;
 
-            if ((currentAngle < 0 && currentAngle > -Math.PI + angle) ||
-                 (currentAngle > Math.PI / 2 + angle))
-            {
-                this.rotateTankRight(move);
-                result = true;
-            }
-            else if ((currentAngle > 0 && currentAngle < Math.PI / 2 - angle) ||
-                     (currentAngle < -Math.PI / 2 - angle))
-            {
-                this.rotateTankLeft(move);
-                result = true;
-            }
+        if ((currentAngle < 0 && currentAngle > -relativelyAngle + angle) ||
+             (currentAngle > relativelyAngle + angle))
+        {
+            this.rotateTankRight(move);
+            result = true;
+        }
+        else if ((currentAngle > 0 && currentAngle < relativelyAngle - angle) ||
+                 (currentAngle < -relativelyAngle - angle))
+        {
+            this.rotateTankLeft(move);
+            result = true;
         }
         return result;
     }
@@ -398,13 +474,15 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
      * @param tanks
      * @return
      */
-    private Tank getClosesAggressiveTank(Tank self, Tank[] tanks)
+    private Tank getClosestAggressiveTank(Tank self, Tank[] tanks, boolean notShootingYet)
     {
         Tank result = null;
         double prevDistance = 0;
         for (Tank tank : tanks)
         {
-            if (!tank.isTeammate() && Math.abs(tank.getTurretAngleTo(self)) < CATCH_ANGLE)
+            boolean ignoreThisTank = !notShootingYet || tank.getRemainingReloadingTime() > tank.getReloadingTime() / 1.5;
+            if (!ignoreThisTank && !tank.isTeammate() &&
+                    Math.abs(tank.getTurretAngleTo(self)) < CATCH_ANGLE)
             {
                 if (result == null || (prevDistance > self.getDistanceTo(tank)))
                 {
@@ -425,19 +503,28 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
      */
     private Point2D getPointInClosestAngle(Tank tank, World world)
     {
-        if (tank.getDistanceTo(world.getWidth() - IN_ANGLE_DISTANCE, world.getHeight() - IN_ANGLE_DISTANCE) < MAX_TANKS_DISTANCE / 5)
+        Point2D result = null;
+        double prevDistance = 0;
+        double currentDistance;
+        Point2D[] points = new Point2D[4];
+        points[0] = new Point2D.Double(world.getWidth() - IN_ANGLE_DISTANCE, world.getHeight() - IN_ANGLE_DISTANCE);
+        points[1] = new Point2D.Double(IN_ANGLE_DISTANCE, world.getHeight() - IN_ANGLE_DISTANCE);
+        points[2] = new Point2D.Double(IN_ANGLE_DISTANCE, IN_ANGLE_DISTANCE);
+        points[3] = new Point2D.Double(world.getWidth() - IN_ANGLE_DISTANCE, IN_ANGLE_DISTANCE);
+
+        for (Point2D point : points)
         {
-            return new Point2D.Double(world.getWidth() - IN_ANGLE_DISTANCE, world.getHeight() - IN_ANGLE_DISTANCE);
+            currentDistance = tank.getDistanceTo(point.getX(), point.getY());
+            if (result == null || currentDistance < prevDistance)
+            {
+                result = point;
+                prevDistance = currentDistance;
+            }
         }
-        if (tank.getDistanceTo(IN_ANGLE_DISTANCE, world.getHeight() - IN_ANGLE_DISTANCE) < MAX_TANKS_DISTANCE / 5)
-        {
-            return new Point2D.Double(IN_ANGLE_DISTANCE, world.getHeight() - IN_ANGLE_DISTANCE);
-        }
-        if (tank.getDistanceTo(IN_ANGLE_DISTANCE, IN_ANGLE_DISTANCE) < MAX_TANKS_DISTANCE / 5)
-        {
-            return new Point2D.Double(IN_ANGLE_DISTANCE, IN_ANGLE_DISTANCE);
-        }
-        return new Point2D.Double(world.getWidth() - IN_ANGLE_DISTANCE, IN_ANGLE_DISTANCE);
+
+        //System.out.println("angle point for move : " + result.getX() + ", " + result.getY());
+
+        return result;
     }
 
     /**
@@ -540,8 +627,7 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
             }
             else
             {
-                move.setRightTrackPower(1);
-                move.setLeftTrackPower(1);
+                this.moveTankForward(move);
             }
         }
         else
@@ -556,8 +642,7 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
             }
             else
             {
-                move.setRightTrackPower(-1);
-                move.setLeftTrackPower(-1);
+                this.moveTankBackward(move);
             }
         }
     }
@@ -568,10 +653,10 @@ public class AttackPriorityStrategy implements IStrategyPerformer {
      * @param world
      * @return
      */
-    private boolean tankInCenter(Tank tank, World world)
+    private boolean tankInCenter(Tank tank, World world, double distanceToWall)
     {
-        return tank.getX() > IN_CENTER_DISTANCE && tank.getX() < world.getWidth() - IN_CENTER_DISTANCE &&
-               tank.getY() > IN_CENTER_DISTANCE && tank.getY() < world.getHeight() - IN_CENTER_DISTANCE;
+        return tank.getX() > distanceToWall && tank.getX() < world.getWidth() - distanceToWall &&
+               tank.getY() > distanceToWall && tank.getY() < world.getHeight() - distanceToWall;
     }
 
 }
